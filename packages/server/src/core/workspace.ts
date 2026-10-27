@@ -3,6 +3,7 @@ import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
+import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, shell } from "../process"
 
 export class WorkspaceError extends Data.TaggedError("WorkspaceError")<{ readonly message: string }> {}
 
@@ -44,15 +45,6 @@ export class WorkspaceService extends Context.Tag("cloudagents/WorkspaceService"
   WorkspaceShape
 >() {}
 
-const killGroup = (pid: number | undefined, signal: NodeJS.Signals) => {
-  if (pid === undefined) return
-  try {
-    process.kill(-pid, signal)
-  } catch {
-    // group already gone
-  }
-}
-
 /** Spawns a process in its own process group; interruption kills the whole group. */
 const runProcess = (
   file: string,
@@ -69,12 +61,14 @@ const runProcess = (
       clearTimeout(timer)
       resume(effect)
     }
-    const child = spawn(file, args, {
-      cwd: opts.cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env },
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    })
+    const child = ownGroup(
+      spawn(file, args, {
+        cwd: opts.cwd,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...opts.env },
+        detached: NEW_PROCESS_GROUP,
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    )
     let stdout = ""
     let stderr = ""
     child.stdout.setEncoding("utf8")
@@ -87,7 +81,7 @@ const runProcess = (
     })
     if (opts.timeoutMs !== undefined) {
       timer = setTimeout(() => {
-        killGroup(child.pid, "SIGKILL")
+        killProcessGroup(child.pid, "SIGKILL")
         finish(Effect.fail(new WorkspaceError({ message: `${label} timed out after ${opts.timeoutMs}ms` })))
       }, opts.timeoutMs)
     }
@@ -101,7 +95,7 @@ const runProcess = (
       if (done) return
       done = true
       clearTimeout(timer)
-      killGroup(child.pid, "SIGKILL")
+      killProcessGroup(child.pid, "SIGKILL")
     })
   })
 
@@ -241,7 +235,7 @@ const make: WorkspaceShape = {
     }),
 
   exec: (cwd, command, opts) =>
-    runProcess("sh", ["-c", command], { cwd, env: opts?.env, timeoutMs: opts?.timeoutMs }, "command"),
+    runProcess(shell(), ["-c", command], { cwd, env: opts?.env, timeoutMs: opts?.timeoutMs }, "command"),
 }
 
 export const WorkspaceLive = Layer.succeed(WorkspaceService, make)

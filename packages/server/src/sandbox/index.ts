@@ -4,6 +4,7 @@ import { accessSync, constants, existsSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
+import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "../process"
 import { ensureTaskNet, joinTaskNet } from "./netns"
 import { applyTaskLimits, busEnv, scopeArgs, type LaunchKind, type SystemdSettings } from "./systemd"
 
@@ -225,17 +226,6 @@ export const sandboxSettingsOf = (config: {
   boxPort: config.port,
 })
 
-const killGroup = (pid: number | undefined, signal: NodeJS.Signals) => {
-  if (pid === undefined) return
-  try {
-    process.kill(-pid, signal)
-  } catch {
-    // group already gone
-  }
-}
-
-export const killProcessGroup = killGroup
-
 export const findExecutable = (name: string): string | null => {
   for (const dir of (process.env.PATH ?? "").split(":")) {
     if (dir === "") continue
@@ -294,6 +284,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
     })
     const home = agentHome(settings, req.homeDir)
     const env: Record<string, string> = {
+      ...(settings.enabled ? {} : platformEnv()),
       PATH: settings.enabled ? (settings.binPath as string) : (process.env.PATH ?? "/usr/bin:/bin"),
       HOME: home,
       TERM: process.env.TERM ?? "xterm",
@@ -328,7 +319,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
             return { file: file as string, args: [...args, bwrap as string, ...bwrapArgs] }
           },
         )
-      : { file: "sh", args: ["-c", req.command] }
+      : { file: shell(), args: ["-c", req.command] }
 
     if (settings.systemd === null) return { ...inner, env, cwd: req.worktreePath, home }
 
@@ -363,12 +354,14 @@ export const runProcess = (
       clearTimeout(timer)
       resume(effect)
     }
-    const child = spawn(file, [...args], {
-      cwd: opts.cwd,
-      env: { ...opts.env },
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    })
+    const child = ownGroup(
+      spawn(file, [...args], {
+        cwd: opts.cwd,
+        env: { ...opts.env },
+        detached: NEW_PROCESS_GROUP,
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    )
     let stdout = ""
     let stderr = ""
     child.stdout.setEncoding("utf8")
@@ -381,7 +374,7 @@ export const runProcess = (
     })
     if (opts.timeoutMs !== undefined) {
       timer = setTimeout(() => {
-        killGroup(child.pid, "SIGKILL")
+        killProcessGroup(child.pid, "SIGKILL")
         finish(Effect.fail(new InternalError({ message: `timed out after ${opts.timeoutMs}ms` })))
       }, opts.timeoutMs)
     }
@@ -395,6 +388,6 @@ export const runProcess = (
       if (done) return
       done = true
       clearTimeout(timer)
-      killGroup(child.pid, "SIGKILL")
+      killProcessGroup(child.pid, "SIGKILL")
     })
   })

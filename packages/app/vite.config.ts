@@ -3,8 +3,8 @@ import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
-// Local dev: `nix run` starts the Worker (control plane) and sets these per Linux user so several
-// people can develop on one machine. Defaults match a single-user setup.
+// Local dev: `bun run dev` (scripts/dev.ts) starts the Worker (control plane) and sets these per Linux user and
+// slot so several stacks can run on one machine. Defaults match a single-user setup.
 const CONTROL_PLANE = `http://127.0.0.1:${process.env.KESTREL_CONTROL_PORT ?? "8788"}`
 const APP_PORT = Number(process.env.KESTREL_APP_PORT ?? "5173")
 

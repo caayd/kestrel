@@ -10,7 +10,8 @@ import {
   type CliProvider,
 } from "@cloudagents/protocol"
 import { Config } from "./config"
-import { cliBwrapArgs, findExecutable, killProcessGroup } from "./sandbox"
+import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "./process"
+import { cliBwrapArgs, findExecutable } from "./sandbox"
 
 /*
  * Per-user subscription logins of the agent CLIs (Claude Pro/Max, ChatGPT). Each signed-in user's
@@ -311,7 +312,8 @@ export const CliAuthLive = Layer.effect(
         if (previous) killEntry(previous)
         const inv = yield* invoke(user, spec.bin, spec.login)
         const child = yield* Effect.try({
-          try: () => spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: true }),
+          try: () =>
+            ownGroup(spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: NEW_PROCESS_GROUP })),
           catch: () => new InternalError({ message: `${spec.bin} could not be started` }),
         })
         child.stdin?.on("error", () => {})

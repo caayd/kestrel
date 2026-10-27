@@ -34,7 +34,7 @@ git push -u origin HEAD                          # or: git push --force-with-lea
 gh pr create --fill                              # title: what changed; body: why + how you verified
 ```
 
-Clean up after the PR is merged (yours, or one you were asked to merge). Stop that worktree's `nix run` first,
+Clean up after the PR is merged (yours, or one you were asked to merge). Stop that worktree's stack first,
 and run this from the main clone, not from inside the worktree:
 
 ```sh
@@ -53,23 +53,24 @@ git pull --ff-only origin main
 - Dependencies are shared, not duplicated: bun hardlinks every package from its global cache
   (`~/.bun/install/cache`), and the flake's tools come from `/nix/store`, so a new worktree installs in about a second
   and costs almost no disk. Don't copy or symlink `node_modules` between worktrees; run `bun install` in each.
-- Nix is optional. The flake pins the toolchain and gives you `nix run`; without Nix, install Bun and Node 22 and
-  follow "Without Nix" in `README.md`.
+- Nix is optional. The flake pins the toolchain and gives you `nix run` with the agent sandbox; without Nix, install
+  Bun and Node 22 and use `bun run dev` (see "Without Nix" in `README.md`).
 
 ## Running the stack from a worktree
 
 ```sh
-KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run
+KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 bun run dev   # any OS; agents unsandboxed
+KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same script, sandboxed
 ```
 
-- `nix run` starts the Worker, a dev box and Vite, and prints its ports. It installs dependencies on first run.
-  Without Nix, start the three processes by hand as in `README.md` and pick ports that no other stack uses.
+- Either starts the Worker, a dev box and Vite, and prints its ports. `nix run` installs dependencies on first run;
+  run `bun install --frozen-lockfile` yourself before `bun run dev`.
 - Ports are unique per Linux user and per `KESTREL_DEV_SLOT` (0-9). **Give every worktree that runs at the same
-  time its own slot**, or the second `nix run` fails on a busy port.
-- **At most one `nix run` per worktree.** The local Worker state (`.wrangler/`) is per directory; a second stack
+  time its own slot**, or the second stack fails on a busy port.
+- **At most one stack per worktree.** The local Worker state (`.wrangler/`) is per directory; a second stack
   in the same worktree dies with `SQLITE_BUSY`. Need two stacks? Use two worktrees.
 - `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent (no model key, exercises MCP and the desktop). Use a real key only
-  when you need a real agent (`ANTHROPIC_API_KEY=... nix run`, never committed).
+  when you need a real agent (`ANTHROPIC_API_KEY=... bun run dev`, never committed).
 - Sign in at `http://localhost:<app port>/auth/dev-login`. From a laptop: `ssh -L <port>:localhost:<port> <you>@<machine>`.
 - Marketing site only: `cd packages/site && bunx astro dev --port <n>` (default 4321). It runs in the background;
   stop it with `bunx astro dev stop` from the same directory.

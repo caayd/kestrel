@@ -6,6 +6,7 @@
     "packages/*"
   ],
   "scripts": {
+    "dev": "bun scripts/dev.ts",
     "typecheck": "bun run --filter '*' typecheck",
     "dev:server": "bun run --filter @cloudagents/server dev",
     "dev:app": "bun run --filter @cloudagents/app dev",

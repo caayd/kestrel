@@ -10,10 +10,11 @@ Run your own agent harness in a sandboxed box with a live desktop.
 
 ## Local development
 
-Nothing in the cloud is required. Nix is optional: the flake is a convenience that pins the toolchain and starts the whole stack with one command.
+Nothing in the cloud is required. One command starts the whole stack on Linux, macOS and Windows; it needs Bun and Node 22 (for `wrangler`):
 
 ```sh
-nix run
+bun install --frozen-lockfile
+bun run dev
 ```
 
 This starts (ports for uid 1000; see below):
@@ -21,29 +22,23 @@ This starts (ports for uid 1000; see below):
 - a box on 127.0.0.1:8797 connected to that Worker (data in `.data-dev/`); 8787 is left to the production box,
 - Vite on http://localhost:5173.
 
-Open the printed URL (`/auth/dev-login`) to sign in as `dev`. The first run creates `packages/control/.dev.vars` with a random local box token.
+Open the printed URL (`/auth/dev-login`) to sign in as `dev`. The first run creates `packages/control/.dev.vars` with a random local box token and builds `packages/app/dist`, which the Worker serves. Output is prefixed `[worker]`, `[box]` and `[app]`; Ctrl+C stops all three, and so does any one of them exiting. `CLOUDAGENTS_FAKE_AGENT=1 bun run dev` runs a scripted agent that needs no model key.
+
+### Nix
+
+`nix run` runs the same `bun run dev` with the flake's toolchain (Bun, Node, wrangler, bubblewrap, pasta, the desktop stack). Nix is what turns the agent sandbox on: the sandbox exposes only `/nix/store` and a toolchain directory from it (`CLOUDAGENTS_SANDBOX_PATH`, `CLOUDAGENTS_SANDBOX_SSL`, set by the flake). On NixOS use the flake: the npm `workerd` binary that `bunx wrangler` runs does not start there, so the flake passes its own wrangler in `KESTREL_WRANGLER`.
 
 ### Without Nix
 
-Install Bun and Node 22 yourself. That is enough for the app, the control plane, the site, `bun run typecheck` and the builds. The box's desktop also needs Xvfb, openbox, xterm, xdotool and an ffmpeg built with x11grab. Then run what `nix run` would, the last three commands each in its own terminal:
+Without `CLOUDAGENTS_SANDBOX_PATH`, `bun run dev` starts the box with `CLOUDAGENTS_SANDBOX=0`, which runs agents unsandboxed: fine for local work with the fake agent or your own key, never for a shared or production box. Set `CLOUDAGENTS_SANDBOX` yourself to override that.
 
-```sh
-bun install --frozen-lockfile
-bun run build:app                      # once; the Worker serves packages/app/dist
-printf 'BOX_TOKEN=%s\nDEV_SESSION_LOGIN=dev\nALLOWED_GITHUB_LOGINS=dev\n' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" > packages/control/.dev.vars
-
-(cd packages/control && bunx wrangler dev --port 8788 --ip 127.0.0.1)   # Worker
-CLOUDAGENTS_PORT=8797 CLOUDAGENTS_DATA_DIR=$PWD/.data-dev CLOUDAGENTS_CONTROL_URL=http://127.0.0.1:8788 \
-  CLOUDAGENTS_BOX_TOKEN=$(sed -n 's/^BOX_TOKEN=//p' packages/control/.dev.vars) \
-  CLOUDAGENTS_SANDBOX=0 bun run dev:server                               # box; keep it off 8787
-bun run dev:app                                                          # Vite on :5173
-```
-
-The agent sandbox is the one part that still depends on Nix: it exposes only `/nix/store` and a toolchain directory from it (`CLOUDAGENTS_SANDBOX_PATH`, `CLOUDAGENTS_SANDBOX_SSL`, set by the flake). Without Nix, run the box with `CLOUDAGENTS_SANDBOX=0` as above, which runs agents unsandboxed: fine for local work with the fake agent or your own key, never for a shared or production box. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager. On NixOS use the flake: the npm `workerd` binary that `bunx wrangler` runs does not start there.
+- **Linux:** the task desktop needs Xvfb, openbox, xterm, xdotool and an ffmpeg built with x11grab. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
+- **macOS and Windows:** no task desktop (Xvfb and x11grab are Linux-only; runs go ahead without a display and the task says why) and no resource limits (`bun run dev` sets `CLOUDAGENTS_SYSTEMD=0`).
+- **Windows:** agent commands and `workspace_exec` run through POSIX `sh`: the one on `PATH`, else the one from Git for Windows. Each process the box starts gets its own job object, so cancelling a run or stopping the stack also ends whatever it started. There is no uid, so ports move only with `KESTREL_DEV_SLOT`.
 
 ### Shared dev machine
 
-Several people can run `nix run` on one machine, each from their own clone under their own Linux user, and each person can run several worktrees at once. Ports are offset by `(uid - 1000) * 100 + KESTREL_DEV_SLOT * 10` (slot 0-9, default 0; `KESTREL_DEV_OFFSET` overrides the whole offset): uid 1001 slot 0 gets app 5273, Worker 8888, box 8897; slot 1 adds 10 to each. `nix run` prints the ports. From your laptop, forward the app port and open it locally:
+Several people can run `bun run dev` (or `nix run`) on one machine, each from their own clone under their own Linux user, and each person can run several worktrees at once. Ports are offset by `(uid - 1000) * 100 + KESTREL_DEV_SLOT * 10` (slot 0-9, default 0; `KESTREL_DEV_OFFSET` overrides the whole offset): uid 1001 slot 0 gets app 5273, Worker 8888, box 8897; slot 1 adds 10 to each. The ports are printed at startup. From your laptop, forward the app port and open it locally:
 
 ```sh
 ssh -L 5273:localhost:5273 <you>@<dev-machine>

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { existsSync } from "node:fs"
 import { Context, Data, Deferred, Effect, Layer } from "effect"
 import type { DesktopInput, DesktopState, DesktopStatus } from "@cloudagents/protocol"
+import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { avcCodecString, Mp4Splitter, type Mp4Piece } from "./fmp4"
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
@@ -144,15 +145,6 @@ const ffmpegArgs = (display: string): string[] => [
   "pipe:1",
 ]
 
-const killGroup = (p: ChildProcess, signal: NodeJS.Signals) => {
-  if (p.pid === undefined) return
-  try {
-    process.kill(-p.pid, signal)
-  } catch {
-    // group already gone
-  }
-}
-
 const waitExit = (p: ChildProcess, ms: number): Promise<void> => {
   if (p.exitCode !== null || p.signalCode !== null) return Promise.resolve()
   const { promise, resolve } = Promise.withResolvers<void>()
@@ -167,9 +159,9 @@ const waitExit = (p: ChildProcess, ms: number): Promise<void> => {
 /** SIGTERM every process group, wait a grace period, then SIGKILL whatever is left. */
 const terminate = async (procs: Iterable<ChildProcess>) => {
   const list = [...procs]
-  for (const p of list) killGroup(p, "SIGTERM")
+  for (const p of list) killProcessGroup(p.pid, "SIGTERM")
   await Promise.all(list.map((p) => waitExit(p, TERM_GRACE_MS)))
-  for (const p of list) killGroup(p, "SIGKILL")
+  for (const p of list) killProcessGroup(p.pid, "SIGKILL")
 }
 
 const waitForSocket = async (s: Session) => {
@@ -284,12 +276,14 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         onStdout?: (d: Buffer) => void
       },
     ) => {
-      const child = spawn(command, args, {
-        cwd: opts.cwd,
-        detached: true,
-        env: opts.env ? { ...opts.env } : { ...process.env, DISPLAY: s.display },
-        stdio: ["ignore", opts.onStdout ? "pipe" : "ignore", "pipe"],
-      })
+      const child = ownGroup(
+        spawn(command, args, {
+          cwd: opts.cwd,
+          detached: NEW_PROCESS_GROUP,
+          env: opts.env ? { ...opts.env } : { ...process.env, DISPLAY: s.display },
+          stdio: ["ignore", opts.onStdout ? "pipe" : "ignore", "pipe"],
+        }),
+      )
       s.procs.add(child)
       child.stderr?.on("data", (d: Buffer) => {
         s.stderrTail = (s.stderrTail + d.toString()).slice(-4000)
@@ -391,12 +385,15 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     // Kill desktops on process exit even if shutdown hooks never ran.
     process.on("exit", () => {
-      for (const s of sessions.values()) for (const p of s.procs) killGroup(p, "SIGKILL")
+      for (const s of sessions.values()) for (const p of s.procs) killProcessGroup(p.pid, "SIGKILL")
     })
 
     return DesktopManager.of({
       start: (taskId, opts) =>
         Effect.gen(function* () {
+          if (process.platform !== "linux") {
+            return yield* Effect.fail(new DesktopError({ message: "the task desktop needs Linux (Xvfb, x11grab)" }))
+          }
           if (sessions.get(taskId)?.state === "failed") yield* stopTask(taskId)
           const ready = yield* Deferred.make<void, DesktopError>()
           const claim = yield* Effect.try({

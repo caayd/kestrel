@@ -8,7 +8,8 @@ import { InternalError, type CliProvider, type Message, type Run, type ServerEve
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { Config } from "../config"
-import { SANDBOX_HOME, agentHome, initBox, killProcessGroup, prepareLaunch, sandboxSettingsOf } from "../sandbox"
+import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
+import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable } from "./state"
 
@@ -233,12 +234,14 @@ export const AgentHarnessLive = Layer.effect(
 
             return yield* Effect.try({
               try: () => {
-                const child = spawn(launch.file, [...launch.args], {
-                  cwd: launch.cwd,
-                  env: { ...launch.env },
-                  detached: true,
-                  stdio: ["ignore", "pipe", "pipe"],
-                })
+                const child = ownGroup(
+                  spawn(launch.file, [...launch.args], {
+                    cwd: launch.cwd,
+                    env: { ...launch.env },
+                    detached: NEW_PROCESS_GROUP,
+                    stdio: ["ignore", "pipe", "pipe"],
+                  }),
+                )
                 const log = createWriteStream(join(runDir, "output.log"), { flags: "a" })
                 const entry: ActiveRun = {
                   child,
