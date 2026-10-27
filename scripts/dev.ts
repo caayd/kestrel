@@ -126,6 +126,8 @@ const start = (name: string, cwd: string, command: string, args: readonly string
 
 process.on("SIGINT", () => void stop(0, true))
 process.on("SIGTERM", () => void stop(0, false))
+// The children lead their own process groups, so a closed terminal reaches only this script.
+process.on("SIGHUP", () => void stop(0, false))
 
 // KESTREL_WRANGLER: the flake's wrangler, because the npm workerd binary does not run on NixOS.
 const [wrangler, ...wranglerArgs] = env.KESTREL_WRANGLER ? [env.KESTREL_WRANGLER] : [bun, "x", "wrangler"]
