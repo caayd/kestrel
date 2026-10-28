@@ -143,13 +143,12 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
             const attachments = m.attachments ?? []
             // Attachments and answer buttons stay on the message itself, so it survives hiding its text.
             const extras = attachments.length > 0 || m.id === pendingAsk?.id
+            const turn = m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined
+            // While the prompt is the run's last message, its status goes under the transcript once one exists.
+            const turnBelowTranscript = startedRunId !== null && (itemCountByRun.get(startedRunId) ?? 0) > 0
             return (
               <Fragment key={m.id}>
-                <ThreadItem
-                  message={m}
-                  turn={m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined}
-                  hideText={duplicate}
-                >
+                <ThreadItem message={m} turn={turnBelowTranscript ? undefined : turn} hideText={duplicate}>
                   {extras ? (
                     <>
                       {attachments.map((a) => (
@@ -179,6 +178,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
                   ) : null}
                 </ThreadItem>
                 {startedRunId !== null && <RunTranscript runId={startedRunId} />}
+                {turnBelowTranscript && <TurnFooter status={turn} />}
               </Fragment>
             )
           })}
