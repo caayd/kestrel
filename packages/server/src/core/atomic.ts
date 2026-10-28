@@ -13,7 +13,9 @@ export const writeAtomic = async (file: string, data: string): Promise<void> => 
     await handle.close()
   }
   await rename(tmp, file)
-  // Persist the rename itself; without this a crash can roll the directory entry back.
+  // Persist the rename itself; without this a crash can roll the directory entry back. Windows cannot fsync a
+  // directory (EPERM), and a failure here would report a write that already landed as failed.
+  if (process.platform === "win32") return
   const dir = await open(dirname(file), "r")
   try {
     await dir.sync()
