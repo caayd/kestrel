@@ -8,6 +8,7 @@ import {
   type Connection,
   type GithubRepo,
   type Me,
+  type RelayCredentials,
 } from "@cloudagents/protocol"
 import {
   PROVIDERS,
@@ -20,7 +21,8 @@ import {
 } from "./providers"
 import { UpstreamError, errorResponse, json, maskKey } from "./http"
 import { hub, type Env } from "./env"
-import { sessionLogin } from "./auth"
+import { currentSession } from "./auth"
+import type { SessionRecord } from "./hub"
 import { handleAutomations } from "./automations"
 
 type ConnectionRow = { provider: string; account: string | null }
@@ -109,11 +111,12 @@ const listRepos = async (env: Env, login: string): Promise<Response> => {
   return json(repos)
 }
 
-/** Forwards a browser request to the box with the caller's credentials attached. */
-const relayToBox = async (request: Request, env: Env, login: string, url: URL): Promise<Response> => {
-  const creds = await hub(env).credentials(login)
+/** Forwards a browser request to the box with the caller's credentials (and dev-login marker) attached. */
+const relayToBox = async (request: Request, env: Env, session: SessionRecord, url: URL): Promise<Response> => {
+  const creds = await hub(env).credentials(session.login)
+  const relayed: RelayCredentials = session.dev ? { ...creds, dev: true } : creds
   const headers = new Headers(request.headers)
-  headers.set(CREDENTIALS_HEADER, JSON.stringify(creds))
+  headers.set(CREDENTIALS_HEADER, JSON.stringify(relayed))
   const hasBody = request.method !== "GET" && request.method !== "HEAD"
   const forwarded = new Request(`https://hub${url.pathname}${url.search}`, {
     method: request.method,
@@ -125,8 +128,9 @@ const relayToBox = async (request: Request, env: Env, login: string, url: URL): 
 
 /** Routes every `/api/*` request: control routes in the Worker, everything else relayed to the box. */
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
-  const login = await sessionLogin(request, env)
-  if (!login) return errorResponse(401, "Unauthorized", "sign in required")
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  const login = session.login
 
   const path = url.pathname
   const method = request.method
@@ -170,5 +174,5 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     return handleAutomations(request, env, login, url, ControlPaths.automations)
   }
 
-  return relayToBox(request, env, login, url)
+  return relayToBox(request, env, session, url)
 }

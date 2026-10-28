@@ -2,6 +2,7 @@ import { ControlPaths } from "@cloudagents/protocol"
 import { findProvider, type OAuthProvider } from "./providers"
 import { UpstreamError, errorResponse, readCookie, safeReturnPath } from "./http"
 import { hub, type Env } from "./env"
+import type { SessionRecord } from "./hub"
 
 export const SESSION_COOKIE = "session"
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -13,13 +14,13 @@ export const isAllowedLogin = (env: Env, login: string): boolean =>
     .map((s) => s.trim().toLowerCase())
     .includes(login.toLowerCase())
 
-/** Login of the signed-in user, or null when there is no live session for an allowed account. */
-export const sessionLogin = async (request: Request, env: Env): Promise<string | null> => {
+/** The signed-in user's session, or null when there is no live session for an allowed account. */
+export const currentSession = async (request: Request, env: Env): Promise<SessionRecord | null> => {
   const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
   if (!id) return null
-  const login = await hub(env).sessionLogin(id)
-  if (!login || !isAllowedLogin(env, login)) return null
-  return login
+  const session = await hub(env).session(id)
+  if (!session || !isAllowedLogin(env, session.login)) return null
+  return session
 }
 
 const randomToken = (bytes: number): string => {
@@ -127,11 +128,11 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
     await stub.upsertUser({ login: account.login, name: account.name, avatarUrl: account.avatarUrl })
     await stub.putConnection(account.login, provider.id, token, account.login)
     const sessionId = randomToken(32)
-    await stub.createSession(sessionId, account.login, Date.now() + SESSION_TTL_MS)
+    await stub.createSession(sessionId, account.login, Date.now() + SESSION_TTL_MS, false)
     return redirect(row.returnTo, { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
   }
 
-  const login = await sessionLogin(request, env)
+  const login = (await currentSession(request, env))?.login
   if (!login) return htmlPage(401, "Sign in to kestrel before connecting accounts.")
   if (account.login.toLowerCase() !== login.toLowerCase()) {
     return htmlPage(403, "Connect the GitHub account you are signed in with.")
@@ -157,7 +158,7 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
 
   if (path === "/auth/mobile-callback" && request.method === "GET") {
     const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
-    const login = id ? await hub(env).sessionLogin(id) : null
+    const login = id ? (await hub(env).session(id))?.login : null
     if (!id || !login) return errorResponse(401, "Unauthorized", "sign in required")
     return new Response(
       `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kestrel</title><style>body{background:#0e1014;color:#e4e7ee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><p>Signing in to Kestrel mobile...</p><script>window.location.href="kestrel://auth-callback?session=" + encodeURIComponent("${id}");</script></body></html>`,
@@ -178,7 +179,7 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
 
     const provider = findProvider(providerId)
     if (!provider || provider.kind !== "oauth") return errorResponse(404, "NotFound", `unknown provider ${providerId}`)
-    if (!(await sessionLogin(request, env))) return errorResponse(401, "Unauthorized", "sign in required")
+    if (!(await currentSession(request, env))) return errorResponse(401, "Unauthorized", "sign in required")
     const returnTo = safeReturnPath(url.searchParams.get("return"), "/connections")
     return beginOAuth(env, url, "connect", provider, returnTo)
   }
@@ -189,7 +190,7 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     const stub = hub(env)
     await stub.upsertUser({ login, name: login, avatarUrl: "" })
     const sessionId = randomToken(32)
-    await stub.createSession(sessionId, login, Date.now() + SESSION_TTL_MS)
+    await stub.createSession(sessionId, login, Date.now() + SESSION_TTL_MS, true)
     return redirect("/", { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
   }
 

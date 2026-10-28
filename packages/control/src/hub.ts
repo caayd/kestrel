@@ -129,6 +129,9 @@ export type OAuthKind = "login" | "connect"
 
 export type UserRecord = { login: string; name: string | null; avatarUrl: string }
 
+/** `dev`: the session came from `/auth/dev-login`. */
+export type SessionRecord = { login: string; dev: boolean }
+
 export type OAuthStateRecord = { kind: OAuthKind; provider: string; returnTo: string }
 
 type PendingHttp = { resolve: (res: Response) => void; timer: number }
@@ -166,8 +169,14 @@ export class Hub extends DurableObject<Env> {
       sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         login TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL,
+        dev INTEGER NOT NULL DEFAULT 0
       )`)
+      // Sessions tables created before the `dev` column get it here; existing rows are not dev sessions.
+      const sessionColumns = sql.exec<{ name: string }>("PRAGMA table_info(sessions)").toArray()
+      if (!sessionColumns.some((c) => c.name === "dev")) {
+        sql.exec("ALTER TABLE sessions ADD COLUMN dev INTEGER NOT NULL DEFAULT 0")
+      }
       sql.exec(`CREATE TABLE IF NOT EXISTS connections (
         login TEXT NOT NULL,
         provider TEXT NOT NULL,
@@ -229,18 +238,19 @@ export class Hub extends DurableObject<Env> {
     return row ?? null
   }
 
-  createSession(id: string, login: string, expiresAt: number): void {
+  /** `dev` marks a session from `/auth/dev-login`. */
+  createSession(id: string, login: string, expiresAt: number, dev: boolean): void {
     const sql = this.ctx.storage.sql
     sql.exec("DELETE FROM sessions WHERE expires_at <= ?", Date.now())
-    sql.exec("INSERT INTO sessions (id, login, expires_at) VALUES (?, ?, ?)", id, login, expiresAt)
+    sql.exec("INSERT INTO sessions (id, login, expires_at, dev) VALUES (?, ?, ?, ?)", id, login, expiresAt, dev ? 1 : 0)
   }
 
-  /** Login for a live session id, or null when unknown or expired. */
-  sessionLogin(id: string): string | null {
+  /** The live session with this id, or null when unknown or expired. */
+  session(id: string): SessionRecord | null {
     const sql = this.ctx.storage.sql
     sql.exec("DELETE FROM sessions WHERE expires_at <= ?", Date.now())
-    const row = sql.exec<{ login: string }>("SELECT login FROM sessions WHERE id = ?", id).toArray()[0]
-    return row?.login ?? null
+    const row = sql.exec<{ login: string; dev: number }>("SELECT login, dev FROM sessions WHERE id = ?", id).toArray()[0]
+    return row ? { login: row.login, dev: row.dev === 1 } : null
   }
 
   deleteSession(id: string): void {

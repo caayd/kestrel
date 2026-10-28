@@ -16,7 +16,7 @@ import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
 import { createMcpHandler } from "./mcp"
 import { makeWebHandler } from "./http/router"
-import { runRelay } from "./relay/client"
+import { BOX_DEV_HEADER, runRelay } from "./relay/client"
 
 const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
@@ -42,8 +42,8 @@ const toWebRequest = async (req: IncomingMessage): Promise<Request> => {
   const headers = new Headers()
   for (const [name, value] of Object.entries(req.headers)) {
     if (value === undefined) continue
-    // Identity only comes through the relay; a local caller (e.g. a sandboxed agent) cannot claim a user.
-    if (name === BOX_USER_HEADER || name === CREDENTIALS_HEADER) continue
+    // Identity only comes through the relay; a local caller (e.g. a sandboxed agent) cannot claim a user or dev access.
+    if (name === BOX_USER_HEADER || name === BOX_DEV_HEADER || name === CREDENTIALS_HEADER) continue
     if (Array.isArray(value)) for (const v of value) headers.append(name, v)
     else headers.set(name, value)
   }

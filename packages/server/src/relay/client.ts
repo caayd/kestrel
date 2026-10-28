@@ -8,6 +8,7 @@ import {
   encodeFrame,
   fromBase64,
   toBase64,
+  type RelayCredentials,
   type RelayFrame,
 } from "@cloudagents/protocol"
 import { WebSocket } from "ws"
@@ -43,12 +44,19 @@ const HOP_HEADERS: Record<string, true> = {
   [CREDENTIALS_HEADER]: true,
 }
 
+/**
+ * Set to "1" on a relayed request from a `/auth/dev-login` session (dev-only flows such as fixture replay).
+ * Like BOX_USER_HEADER, only the relay sets it: the browser's copy is dropped here and main.ts strips it locally.
+ */
+export const BOX_DEV_HEADER = "x-kestrel-box-dev"
+
 const Credentials = Schema.parseJson(
   Schema.Struct({
     user: Schema.String,
     github: Schema.optional(Schema.String),
     anthropic: Schema.optional(Schema.String),
     openai: Schema.optional(Schema.String),
+    dev: Schema.optional(Schema.Boolean),
   }),
 )
 
@@ -124,7 +132,7 @@ const connectOnce = (
             send(encodeFrame({ t: "ws-close", id: frame.id, code: CLOSE_NOT_FOUND, reason: "not found" }))
             return
           }
-          const user = absorbCredentials(frame.headers, store)
+          const user = absorbCredentials(frame.headers, store)?.user ?? null
           if (user === null) {
             send(encodeFrame({ t: "ws-close", id: frame.id, code: CLOSE_UNAUTHORIZED, reason: "no signed-in user" }))
             return
@@ -178,8 +186,8 @@ const connectOnce = (
     })
   })
 
-/** Stores the signed-in user's credentials from a tunnelled request; returns the user, null when absent or malformed. */
-const absorbCredentials = (headers: Readonly<Record<string, string>>, store: Store): string | null => {
+/** Stores the signed-in user's credentials from a tunnelled request; returns them, null when absent or malformed. */
+const absorbCredentials = (headers: Readonly<Record<string, string>>, store: Store): RelayCredentials | null => {
   const raw = headers[CREDENTIALS_HEADER]
   if (raw === undefined) return null
   const decoded = Schema.decodeUnknownEither(Credentials)(raw)
@@ -188,7 +196,7 @@ const absorbCredentials = (headers: Readonly<Record<string, string>>, store: Sto
     return null
   }
   Effect.runSync(store.set(decoded.right))
-  return decoded.right.user
+  return decoded.right
 }
 
 const serveHttp = async (
@@ -197,7 +205,7 @@ const serveHttp = async (
   store: Store,
   send: (data: string | Uint8Array) => void,
 ) => {
-  const user = absorbCredentials(frame.headers, store)
+  const creds = absorbCredentials(frame.headers, store)
   let res: Response
   try {
     const headers = new Headers()
@@ -205,7 +213,9 @@ const serveHttp = async (
       if (HOP_HEADERS[name.toLowerCase()] !== true) headers.set(name, value)
     }
     headers.delete(BOX_USER_HEADER)
-    if (user !== null) headers.set(BOX_USER_HEADER, user)
+    headers.delete(BOX_DEV_HEADER)
+    if (creds !== null) headers.set(BOX_USER_HEADER, creds.user)
+    if (creds?.dev === true) headers.set(BOX_DEV_HEADER, "1")
     const body = frame.body === undefined ? undefined : new Uint8Array(fromBase64(frame.body))
     const req = new Request(new URL(frame.path, BOX_ORIGIN), { method: frame.method, headers, body })
     res = await handle(req)
