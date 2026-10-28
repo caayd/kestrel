@@ -113,6 +113,44 @@ export const Run = Schema.Struct({
 export type Run = typeof Run.Type
 
 /**
+ * One display item of an agent run, normalized from the harness's own stream (Claude
+ * `stream-json`, Codex `exec --json`) so the app renders every harness the same way.
+ * Ids are unique within a run; a later item with the same id replaces the earlier one
+ * (a tool goes `running` -> `ok`/`error`).
+ */
+export const AgentItem = Schema.Union(
+  /** Assistant prose; markdown, may contain inline HTML/SVG. */
+  Schema.Struct({ _tag: Schema.Literal("text"), id: Schema.String, parentToolId: Schema.NullOr(Schema.String), text: Schema.String }),
+  Schema.Struct({ _tag: Schema.Literal("thinking"), id: Schema.String, parentToolId: Schema.NullOr(Schema.String), text: Schema.String }),
+  Schema.Struct({
+    _tag: Schema.Literal("tool"),
+    id: Schema.String,
+    /** Set when a subagent (e.g. Claude's Task tool) made this call; the id of that Task call. */
+    parentToolId: Schema.NullOr(Schema.String),
+    /** Harness tool name, e.g. "Bash", "mcp__cloudagents__desktop_screenshot", "command_execution". */
+    name: Schema.String,
+    input: Schema.Unknown,
+    status: Schema.Literal("running", "ok", "error"),
+    output: Schema.NullOr(Schema.String),
+  }),
+  /** End of one agent turn. Fields the harness does not report are null. */
+  Schema.Struct({
+    _tag: Schema.Literal("turn"),
+    id: Schema.String,
+    durationMs: Schema.NullOr(Schema.Number),
+    inputTokens: Schema.NullOr(Schema.Number),
+    outputTokens: Schema.NullOr(Schema.Number),
+    costUsd: Schema.NullOr(Schema.Number),
+    isError: Schema.Boolean,
+  }),
+  Schema.Struct({ _tag: Schema.Literal("error"), id: Schema.String, text: Schema.String }),
+)
+export type AgentItem = typeof AgentItem.Type
+
+export const RunItems = Schema.Array(AgentItem)
+export type RunItems = typeof RunItems.Type
+
+/**
  * stopped   no X display / capture running
  * starting  Xvfb + openbox + ffmpeg being spawned
  * running   stream is live; `mime` is set and binary frames are flowing
@@ -186,6 +224,8 @@ export const ServerEvent = Schema.Union(
     stream: Schema.Literal("stdout", "stderr", "event"),
     text: Schema.String,
   }),
+  /** A run's display item was added or replaced (same `item.id`). */
+  Schema.Struct({ _tag: Schema.Literal("agent.item"), taskId: Schema.String, runId: Schema.String, item: AgentItem }),
   Schema.Struct({ _tag: Schema.Literal("desktop.updated"), desktop: DesktopStatus }),
 )
 export type ServerEvent = typeof ServerEvent.Type
@@ -303,6 +343,8 @@ export const Paths = {
    */
   taskUploads: (id: string) => `/api/tasks/${id}/uploads`,
   runCancel: (id: string) => `/api/runs/${id}/cancel`,
+  /** GET -> RunItems: the run's display items so far (live runs) or final (finished runs). */
+  runItems: (id: string) => `/api/runs/${id}/items`,
   /** WebSocket: JSON `ServerEvent` text frames. */
   taskEventsWs: (id: string) => `/api/tasks/${id}/events`,
   /**

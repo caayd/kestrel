@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"0192f3a4-8c25-7d76-8e37-4f5a6b7c8d90"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I will inspect the failing test and patch it."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'bun test packages/server'","aggregated_output":"","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'bun test packages/server'","aggregated_output":"bun test v1.2.21\n\nreplay.test.ts:\n(fail) replays a fixture with a bad line\n\n 0 pass\n 1 fail\n","status":"failed","exit_code":1}}
+{"type":"item.completed","item":{"id":"item_2","type":"error","message":"stream disconnected before completion: connection reset by peer"}}
+{"type":"error","message":"stream disconnected before completion: connection reset by peer"}
+{"type":"turn.failed","error":{"message":"stream disconnected before completion: connection reset by peer"}}

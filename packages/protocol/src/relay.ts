@@ -28,6 +28,8 @@ export interface RelayCredentials {
   readonly github?: string // GitHub OAuth access token
   readonly anthropic?: string // Anthropic API key
   readonly openai?: string // OpenAI API key
+  /** True only for sessions from `/auth/dev-login`; unlocks dev-only box features (fixture replay). */
+  readonly dev?: boolean
 }
 
 export type RelayFrame =
