@@ -16,6 +16,7 @@ import {
   Paths,
   PutApiKeyBody,
   Run,
+  RunItems,
   SendMessageBody,
   SendMessageResponse,
   Task,
@@ -131,6 +132,7 @@ export const api = {
   sendMessage: (taskId: string, body: SendMessageBody) =>
     run(request(SendMessageResponse, "POST", Paths.taskMessages(taskId), body)),
   listRuns: (taskId: string) => run(request(Schema.Array(Run), "GET", Paths.taskRuns(taskId))),
+  runItems: (runId: string) => run(request(RunItems, "GET", Paths.runItems(runId))),
   cancelRun: (runId: string) => run(request(Run, "POST", Paths.runCancel(runId))),
   getDiff: (taskId: string) => run(request(DiffResponse, "GET", Paths.taskDiff(taskId))),
   getDesktop: (taskId: string) => run(request(DesktopStatus, "GET", Paths.taskDesktop(taskId))),

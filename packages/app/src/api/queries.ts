@@ -1,5 +1,5 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
-import type { Message, Run, Task } from "@cloudagents/protocol"
+import type { Message, Run, RunItems, Task } from "@cloudagents/protocol"
 import { api } from "./client"
 
 /** Agent box status poll; it feeds the top bar pill and the offline banner. */
@@ -27,6 +27,7 @@ export const keys = {
   task: (taskId: string) => ["tasks", taskId] as const,
   messages: (taskId: string) => ["tasks", taskId, "messages"] as const,
   runs: (taskId: string) => ["tasks", taskId, "runs"] as const,
+  runItems: (runId: string) => ["runs", runId, "items"] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
 }
@@ -77,6 +78,12 @@ export const queries = {
       queryKey: keys.runs(taskId),
       queryFn: async (): Promise<Run[]> =>
         mergeSnapshot(await api.listRuns(taskId), queryClient.getQueryData(keys.runs(taskId))),
+    }),
+  runItems: (runId: string) =>
+    queryOptions({
+      queryKey: keys.runItems(runId),
+      queryFn: async (): Promise<RunItems> =>
+        mergeSnapshot(await api.runItems(runId), queryClient.getQueryData(keys.runItems(runId))),
     }),
   diff: (taskId: string, running = false) =>
     queryOptions({

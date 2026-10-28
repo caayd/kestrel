@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
-import type { DesktopStatus, Message, Run } from "@cloudagents/protocol"
+import type { DesktopStatus, Message, Run, RunItems } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
 import { keys, queries, storeTask, upsert } from "@/api/queries"
 import { errorText } from "@/util"
@@ -53,6 +53,12 @@ export function useTaskState(taskId: string) {
               ...prev,
               [event.runId]: [...(prev[event.runId] ?? []), ...event.text.split("\n")].slice(-MAX_LOG_LINES),
             }))
+            break
+          case "agent.item":
+            // Same id means the item was replaced (a tool finishing), so upsert keeps its place.
+            queryClient.setQueryData(keys.runItems(event.runId), (list: RunItems | undefined) =>
+              upsert(list, event.item),
+            )
             break
           case "desktop.updated": {
             // Only a move into "running" counts as the agent opening it.

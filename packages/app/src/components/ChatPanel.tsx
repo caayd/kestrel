@@ -1,8 +1,8 @@
-import { useEffect, useRef, type ReactNode } from "react"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { Fragment, useEffect, useRef, type ReactNode } from "react"
+import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query"
 import type { Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
 import { api, taskAttachmentUrl } from "@/api/client"
-import { keys, upsert } from "@/api/queries"
+import { keys, queries, upsert } from "@/api/queries"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { formatClock } from "@/util"
@@ -10,6 +10,7 @@ import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer } from "./Composer"
 import { Markdown } from "./Markdown"
 import { RunPanel } from "./RunPanel"
+import { RunTranscript } from "./RunTranscript"
 import { StatusIcon } from "./StatusIcon"
 
 interface Props {
@@ -41,9 +42,12 @@ function TurnFooter({ status, time }: { status: Run["status"] | undefined; time?
 function ThreadItem({
   message,
   turn,
+  hideText = false,
   children,
 }: {
   message: Message
+  /** The run transcript already renders this text; only what hangs off the message stays. */
+  hideText?: boolean
   turn: Run["status"] | undefined
   children?: ReactNode
 }) {
@@ -62,14 +66,18 @@ function ThreadItem({
           )}
         </div>
       )
-    case "agent":
+    case "agent": {
+      // A duplicated message still holds attachments and answer buttons, and its footer is the running
+      // indicator; only the clock goes, since the transcript's turn footer covers the finished turn.
+      if (hideText && (children === undefined || children === null)) return <TurnFooter status={turn} />
       return (
         <div className={ENTER_CLASS}>
-          <Markdown text={message.text} />
+          {!hideText && <Markdown text={message.text} />}
           {children}
-          <TurnFooter status={turn} time={formatClock(message.createdAt)} />
+          <TurnFooter status={turn} time={hideText ? undefined : formatClock(message.createdAt)} />
         </div>
       )
+    }
     case "system":
       return (
         <div className={cn("self-center text-xs text-muted-foreground italic", ENTER_CLASS)}>
@@ -88,6 +96,13 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
   const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   const runById = new Map(sortedRuns.map((r) => [r.id, r]))
+  // Items of every run in the thread: their count says whether an agent message duplicates its transcript,
+  // and each arrival bumps `dataUpdatedAt`, which is what re-runs the scroll effect.
+  const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(run.id)) })
+  const itemCountByRun = new Map(
+    sortedRuns.map((run, index) => [run.id, runItemQueries[index]?.data?.length ?? 0]),
+  )
+  const itemsRevision = runItemQueries.map((query) => query.dataUpdatedAt).join(",")
   // The last message of each run carries that turn's status.
   const lastMessageOfRun = new Map<string, string>()
   for (const m of sortedMessages) if (m.runId) lastMessageOfRun.set(m.runId, m.id)
@@ -98,7 +113,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
   useEffect(() => {
     const el = threadRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [sortedMessages.length])
+  }, [sortedMessages.length, itemsRevision])
 
   const send = useMutation({
     mutationFn: (body: SendMessageBody) => api.sendMessage(taskId, body),
@@ -121,37 +136,52 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
           {sortedMessages.length === 0 && (
             <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
           )}
-          {sortedMessages.map((m) => (
-            <ThreadItem
-              key={m.id}
-              message={m}
-              turn={m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined}
-            >
-              {(m.attachments ?? []).map((a) => (
-                <img
-                  key={a.id}
-                  src={taskAttachmentUrl(taskId, a.id)}
-                  alt="Attachment"
-                  className="mt-2 max-h-80 rounded-xl shadow-soft"
-                />
-              ))}
-              {m.id === pendingAsk?.id && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {(m.options ?? []).map((option, i) => (
-                    <Button
-                      key={i}
-                      variant="soft"
-                      size="sm"
-                      disabled={send.isPending}
-                      onClick={() => send.mutate({ text: option })}
-                    >
-                      {option}
-                    </Button>
-                  ))}
-                </div>
-              )}
-            </ThreadItem>
-          ))}
+          {sortedMessages.map((m) => {
+            // A user message starts its run: that run's transcript follows the prompt.
+            const startedRunId = m.role === "user" ? m.runId : null
+            const duplicate = m.role === "agent" && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0
+            const attachments = m.attachments ?? []
+            // Attachments and answer buttons stay on the message itself, so it survives hiding its text.
+            const extras = attachments.length > 0 || m.id === pendingAsk?.id
+            return (
+              <Fragment key={m.id}>
+                <ThreadItem
+                  message={m}
+                  turn={m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined}
+                  hideText={duplicate}
+                >
+                  {extras ? (
+                    <>
+                      {attachments.map((a) => (
+                        <img
+                          key={a.id}
+                          src={taskAttachmentUrl(taskId, a.id)}
+                          alt="Attachment"
+                          className="mt-2 max-h-80 rounded-xl shadow-soft"
+                        />
+                      ))}
+                      {m.id === pendingAsk?.id && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {(m.options ?? []).map((option, i) => (
+                            <Button
+                              key={i}
+                              variant="soft"
+                              size="sm"
+                              disabled={send.isPending}
+                              onClick={() => send.mutate({ text: option })}
+                            >
+                              {option}
+                            </Button>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  ) : null}
+                </ThreadItem>
+                {startedRunId !== null && <RunTranscript runId={startedRunId} />}
+              </Fragment>
+            )
+          })}
         </div>
       </div>
       <RunPanel runs={sortedRuns} output={output} />
