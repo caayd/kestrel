@@ -4,6 +4,7 @@ import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, C
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
+import { BOX_DEV_HEADER } from "../relay/client"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
 
@@ -75,6 +76,12 @@ const requestUser = Effect.map(HttpServerRequest.HttpServerRequest, (req) => {
   return user === undefined || user === "" ? null : user
 })
 
+/** `/auth/dev-login` sessions may use dev-only flows (a `/replay` chat message); the relay marks them. */
+const requestIsDev = Effect.map(
+  HttpServerRequest.HttpServerRequest,
+  (req) => req.headers[BOX_DEV_HEADER] === "1",
+)
+
 /** Runs `f` for the signed-in user; a request without one is refused. */
 const signedIn = <A, R>(f: (user: string) => Effect.Effect<A, ApiError, R>) =>
   Effect.flatMap(requestUser, (user) =>
@@ -144,9 +151,11 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/tasks/:id/messages",
       Effect.flatMap(pathId, (id) =>
         respond(
-          signedIn((user) =>
-            Effect.flatMap(jsonBody(SendMessageBody), (body) =>
-              core.sendMessage(user, id, body.text, { model: body.model, effort: body.effort }, body.attachments ?? []),
+          Effect.flatMap(requestIsDev, (dev) =>
+            signedIn((user) =>
+              Effect.flatMap(jsonBody(SendMessageBody), (body) =>
+                core.sendMessage(user, id, body.text, { model: body.model, effort: body.effort }, body.attachments ?? [], dev),
+              ),
             ),
           ),
         ),
@@ -165,6 +174,10 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
     HttpRouter.post(
       "/api/runs/:id/cancel",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.cancelRun(user, id)))),
+    ),
+    HttpRouter.get(
+      "/api/runs/:id/items",
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.runItems(user, id)))),
     ),
     HttpRouter.get(
       "/api/tasks/:id/diff",

@@ -21,6 +21,8 @@ export const taskIdOf = (event: ServerEvent): string => {
       return event.run.taskId
     case "agent.output":
       return event.taskId
+    case "agent.item":
+      return event.taskId
     case "desktop.updated":
       return event.desktop.taskId
   }

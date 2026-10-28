@@ -1,12 +1,14 @@
-import { Context, Effect, Either, Layer, Runtime } from "effect"
+import { Context, Effect, Either, Layer, Runtime, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
 import { createWriteStream, type WriteStream } from "node:fs"
-import { chmod, mkdir, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
 import {
   InternalError,
+  RunItems,
   type AgentEffort,
+  type AgentItem,
   type AgentModel,
   type CliProvider,
   type Message,
@@ -21,6 +23,7 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
+import { makeTranscript, type Transcript } from "./transcript"
 
 export interface AgentHarnessShape {
   /**
@@ -43,6 +46,13 @@ export interface AgentHarnessShape {
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
   /** Marks a run that never started as failed. */
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
+  /** A run's display items: the live list while it runs, the persisted final list afterwards. */
+  readonly items: (runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, InternalError>
+  /**
+   * Plays a recorded fixture through the normal run pipeline (stdout -> items -> finish) instead
+   * of launching an agent. Dev-only `/replay` flow; the fixture path is trusted repo state.
+   */
+  readonly replay: (task: Task, run: Run, fixturePath: string) => Effect.Effect<void, InternalError>
   /** Stops every active run at shutdown; their questions stay pending for the next start. */
   readonly stopAll: () => Effect.Effect<void>
 }
@@ -61,7 +71,17 @@ interface ActiveRun {
   readonly taskId: string
   readonly stdoutLines: string[]
   readonly stderrLines: string[]
-  resultText: string | null
+  /** Display items in insertion order; a replacement keeps its original position. */
+  readonly items: Map<string, AgentItem>
+  readonly transcript: Transcript
+}
+
+/** How to start a run's child process; real agent launches and replays differ only here. */
+interface ProcessSpec {
+  readonly file: string
+  readonly args: ReadonlyArray<string>
+  readonly cwd: string
+  readonly env: NodeJS.ProcessEnv
 }
 
 const KILL_GRACE_MS = 3000
@@ -123,6 +143,13 @@ export const AgentHarnessLive = Layer.effect(
         entry.log.end()
         if (spawnError) entry.stderrLines.push(spawnError)
 
+        // The items are the run's display history; keep them next to the raw log for later reads.
+        yield* Effect.tryPromise({
+          try: () =>
+            writeFile(join(config.runsDir, runId, "items.json"), JSON.stringify([...entry.items.values()]), "utf8"),
+          catch: (e) => new InternalError({ message: `cannot write run items: ${String(e)}` }),
+        }).pipe(Effect.catchAll((e) => Effect.logWarning(`run ${runId}: ${e.message}`)))
+
         const outcome = yield* store.update((s) => {
           const run = s.runs.find((r) => r.id === runId)
           // Cancelled (or otherwise finished) runs keep their state.
@@ -138,7 +165,7 @@ export const AgentHarnessLive = Layer.effect(
           if (task.status !== "needs_input") task.status = ok ? "done" : "failed"
           task.updatedAt = now
           const text =
-            entry.resultText ??
+            entry.transcript.finalText() ??
             (entry.stdoutLines.join("\n").trim() ||
               entry.stderrLines.join("\n").trim() ||
               (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`))
@@ -209,15 +236,10 @@ export const AgentHarnessLive = Layer.effect(
       if (trimmed.startsWith("{")) {
         try {
           const parsed: unknown = JSON.parse(trimmed)
-          if (
-            typeof parsed === "object" &&
-            parsed !== null &&
-            "type" in parsed &&
-            parsed.type === "result" &&
-            "result" in parsed &&
-            typeof parsed.result === "string"
-          ) {
-            entry.resultText = parsed.result
+          // Every parsed line goes through the run's transcript, whether or not it yields items.
+          for (const item of entry.transcript.push(parsed)) {
+            entry.items.set(item.id, item)
+            publish({ _tag: "agent.item", taskId: entry.taskId, runId, item })
           }
           const sessionId = sessionIdOf(parsed)
           if (sessionId !== null) runFork(recordSession(runId, sessionId))
@@ -231,10 +253,77 @@ export const AgentHarnessLive = Layer.effect(
       publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "stdout", text: line })
     }
 
+    /**
+     * Starts the run's child and wires stdout/stderr into the shared line, finish and cancel
+     * paths. A real agent launch and a replay differ only in the `ProcessSpec`.
+     */
+    const startRun = (task: Task, run: Run, spec: ProcessSpec): Effect.Effect<void, InternalError> =>
+      Effect.gen(function* () {
+        const runDir = join(config.runsDir, run.id)
+        yield* Effect.tryPromise({
+          try: () => mkdir(runDir, { recursive: true }),
+          catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
+        })
+        yield* Effect.try({
+          try: () => {
+            const child = ownGroup(
+              spawn(spec.file, [...spec.args], {
+                cwd: spec.cwd,
+                env: { ...spec.env },
+                detached: NEW_PROCESS_GROUP,
+                stdio: ["ignore", "pipe", "pipe"],
+              }),
+            )
+            const log = createWriteStream(join(runDir, "output.log"), { flags: "a" })
+            const entry: ActiveRun = {
+              child,
+              log,
+              taskId: task.id,
+              stdoutLines: [],
+              stderrLines: [],
+              items: new Map(),
+              transcript: makeTranscript(),
+            }
+            active.set(run.id, entry)
+            createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
+            createInterface({ input: child.stderr }).on("line", (line) => handleLine(run.id, "stderr", line))
+            child.on("error", (err) => {
+              runFork(finish(run.id, null, `failed to start agent: ${err.message}`))
+            })
+            child.on("close", (code) => {
+              runFork(finish(run.id, code, null))
+            })
+          },
+          catch: (e) => new InternalError({ message: `failed to spawn agent: ${String(e)}` }),
+        })
+      })
+
+    const readItems = (runId: string): Effect.Effect<ReadonlyArray<AgentItem>, InternalError> =>
+      Effect.gen(function* () {
+        const entry = active.get(runId)
+        if (entry) return [...entry.items.values()]
+        const file = join(config.runsDir, runId, "items.json")
+        const text = yield* Effect.tryPromise({
+          try: async () => {
+            try {
+              return await readFile(file, "utf8")
+            } catch (e) {
+              // No items file means the run produced none (or never got as far as writing one).
+              if ((e as NodeJS.ErrnoException).code === "ENOENT") return null
+              throw e
+            }
+          },
+          catch: (e) => new InternalError({ message: `cannot read run items: ${String(e)}` }),
+        })
+        if (text === null) return []
+        return yield* Schema.decodeUnknown(Schema.parseJson(RunItems))(text).pipe(
+          Effect.mapError((e) => new InternalError({ message: `cannot decode run items: ${e.message}` })),
+        )
+      })
+
     const shape: AgentHarnessShape = {
       spawn: (task, run, prompt, display, user, resumeSession, choice) =>
         Effect.gen(function* () {
-          const runDir = join(config.runsDir, run.id)
           const homeDir = join(config.homesDir, task.id)
           const mcpUrl = `${config.mcpBaseUrl}/mcp/${task.id}`
           const mcpConfigHost = join(homeDir, ".cloudagents", "mcp.json")
@@ -245,7 +334,6 @@ export const AgentHarnessLive = Layer.effect(
             const lease = yield* broker.issue(run.id, user)
             yield* Effect.tryPromise({
               try: async () => {
-                await mkdir(runDir, { recursive: true })
                 await mkdir(join(homeDir, ".cloudagents"), { recursive: true })
                 const mcpJson = {
                   mcpServers: {
@@ -300,40 +388,32 @@ export const AgentHarnessLive = Layer.effect(
               binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
             })
 
-            return yield* Effect.try({
-              try: () => {
-                const child = ownGroup(
-                  spawn(launch.file, [...launch.args], {
-                    cwd: launch.cwd,
-                    env: { ...launch.env },
-                    detached: NEW_PROCESS_GROUP,
-                    stdio: ["ignore", "pipe", "pipe"],
-                  }),
-                )
-                const log = createWriteStream(join(runDir, "output.log"), { flags: "a" })
-                const entry: ActiveRun = {
-                  child,
-                  log,
-                  taskId: task.id,
-                  stdoutLines: [],
-                  stderrLines: [],
-                  resultText: null,
-                }
-                active.set(run.id, entry)
-                createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
-                createInterface({ input: child.stderr }).on("line", (line) => handleLine(run.id, "stderr", line))
-                child.on("error", (err) => {
-                  runFork(finish(run.id, null, `failed to start agent: ${err.message}`))
-                })
-                child.on("close", (code) => {
-                  runFork(finish(run.id, code, null))
-                })
-                return null
-              },
-              catch: (e) => new InternalError({ message: `failed to spawn agent: ${String(e)}` }),
+            yield* startRun(task, run, {
+              file: launch.file,
+              args: launch.args,
+              cwd: launch.cwd,
+              env: { ...launch.env },
             })
           }).pipe(Effect.either)
 
+          if (Either.isLeft(started)) {
+            yield* shape.abort(run.id, started.left.message)
+            return yield* Effect.fail(started.left)
+          }
+        }),
+
+      replay: (task, run, fixturePath) =>
+        Effect.gen(function* () {
+          // A replay is trusted repo code running on the host: it only reads a repo fixture and
+          // prints its lines, so it needs no sandbox, broker token, MCP config or checkout. From stdout
+          // on it takes the same paths as a real agent run (handleLine, finish, cancel).
+          const serverDir = join(import.meta.dir, "..", "..")
+          const started = yield* startRun(task, run, {
+            file: process.execPath,
+            args: [join(serverDir, "scripts", "replay-agent.ts"), fixturePath],
+            cwd: serverDir,
+            env: { ...process.env },
+          }).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)
             return yield* Effect.fail(started.left)
@@ -372,6 +452,8 @@ export const AgentHarnessLive = Layer.effect(
           publish({ _tag: "run.updated", run: outcome.run })
           publish({ _tag: "task.updated", task: outcome.task })
         }),
+
+      items: readItems,
 
       stopAll: () =>
         Effect.forEach([...active.keys()], (runId) => stopRun(runId, true).pipe(Effect.ignore), {

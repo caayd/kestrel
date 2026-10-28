@@ -1,5 +1,5 @@
 import { Context, Data, Deferred, Effect, Either, Layer } from "effect"
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
   BadRequest,
@@ -9,6 +9,7 @@ import {
   InternalError,
   MAX_ATTACHMENT_BYTES,
   Message,
+  type AgentItem,
   type Attachment,
   NotFound,
   type PullRequestLink,
@@ -106,16 +107,23 @@ export interface CoreShape {
   readonly diff: (user: string, taskId: string) => Effect.Effect<DiffResponse, NotFound | InternalError>
 
   readonly listMessages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, NotFound>
+  /**
+   * Sends a chat message. `dev` marks a `/auth/dev-login` session: only then does a `/replay`
+   * message play a recorded fixture instead of starting the agent.
+   */
   readonly sendMessage: (
     user: string,
     taskId: string,
     text: string,
     choice: AgentChoice,
     attachmentIds: ReadonlyArray<string>,
+    dev: boolean,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
 
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
   readonly cancelRun: (user: string, runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
+  /** A run's display items; another user's run is NotFound, like every other owned route. */
+  readonly runItems: (user: string, runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, NotFound | InternalError>
 
   readonly desktopStatus: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound>
   readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | Conflict | InternalError>
@@ -237,6 +245,41 @@ const pickCheckout = (task: Task, checkoutId: string | undefined): Effect.Effect
   const ids = task.checkouts.map((c) => `${c.id} (${c.repo})`).join(", ")
   return Effect.fail(new BadRequest({ message: `this thread has several checkouts; pass checkout as one of: ${ids}` }))
 }
+
+/** Recorded harness transcripts (dev-only `/replay`): packages/server/fixtures/agent/<harness>/<name>.jsonl. */
+const FIXTURES_DIR = join(import.meta.dir, "..", "..", "fixtures", "agent")
+const FIXTURE_HARNESSES = ["claude", "codex"] as const
+/** A chat message that is a replay command: `/replay` alone or followed by whitespace and a target. */
+const REPLAY_COMMAND = /^\/replay(\s|$)/
+const REPLAY_TARGET = /^(claude|codex)\/[a-z0-9-]+$/
+
+/** Fixture names on disk, as `harness/name`; a harness with no directory yet simply has none. */
+const availableFixtures = (): Effect.Effect<ReadonlyArray<string>> =>
+  Effect.promise(async () => {
+    const names: string[] = []
+    for (const harness of FIXTURE_HARNESSES) {
+      const files = await readdir(join(FIXTURES_DIR, harness)).catch(() => [])
+      for (const file of files) {
+        if (file.endsWith(".jsonl")) names.push(`${harness}/${file.slice(0, -".jsonl".length)}`)
+      }
+    }
+    return names.sort()
+  })
+
+/** The fixture a `/replay <harness>/<name>` message names, or BadRequest listing what exists. */
+const replayFixturePath = (text: string): Effect.Effect<string, BadRequest> =>
+  Effect.gen(function* () {
+    const target = text.trim().slice("/replay".length).trim()
+    const available = yield* availableFixtures()
+    if (REPLAY_TARGET.test(target) && available.includes(target)) {
+      return join(FIXTURES_DIR, `${target}.jsonl`)
+    }
+    return yield* Effect.fail(
+      new BadRequest({
+        message: `unknown fixture "${target}"; available: ${available.length === 0 ? "none" : available.join(", ")}`,
+      }),
+    )
+  })
 
 export const CoreLive = Layer.effect(
   CoreService,
@@ -639,12 +682,17 @@ export const CoreLive = Layer.effect(
         return yield* requireTask(id)
       })
 
-    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds) =>
+    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds, dev) =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
         if (text.trim() === "" && attachmentIds.length === 0) {
           return yield* Effect.fail(new BadRequest({ message: "message text or an attachment is required" }))
         }
+        // Dev-only: `/replay` names a recorded transcript. Every other message (and every replay
+        // attempt by a non-dev session) starts the agent as usual. Checked before anything is
+        // reserved, so a bad fixture leaves no run or message behind.
+        const replayFixture =
+          dev && REPLAY_COMMAND.test(text.trim()) ? yield* replayFixturePath(text) : null
         // The files reach the task home before the message can, so the agent finds them when it reads the message.
         const uploads = yield* Effect.flatMap(store.read, (state) => {
           const picked = pendingUploads(state, taskId, attachmentIds)
@@ -682,6 +730,11 @@ export const CoreLive = Layer.effect(
             const task = found.right
             if (task.archivedAt !== undefined) {
               return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
+            }
+            // A replay needs its own run: it must not land in a running run's inbox or answer its
+            // question. Refused here, inside the same update that checks for a running run.
+            if (replayFixture !== null && s.runs.some((r) => r.taskId === taskId && r.status === "running")) {
+              return Either.left(new Conflict({ message: "a run is already in progress for this task" }))
             }
             const picked = pendingUploads(s, taskId, attachmentIds)
             if (Either.isLeft(picked)) return Either.left(picked.left)
@@ -751,10 +804,6 @@ export const CoreLive = Layer.effect(
         hub.publish({ _tag: "run.updated", run: reserved.run })
 
         const taskNow = yield* requireTask(taskId)
-        // The desktop is not started with the run: the agent opens it with desktop_open when it needs one. A desktop the
-        // user already has running is passed on, so the run's sandbox can reach it.
-        const desktopNow = yield* desktop.status(taskId)
-        const display = desktopNow.state === "running" ? desktopNow.display : null
 
         // Archiving may have landed since the run was reserved: it cancelled this run and tore the task down,
         // so nothing may be spawned, and a desktop started meanwhile goes too.
@@ -765,6 +814,17 @@ export const CoreLive = Layer.effect(
           if (archived) yield* desktop.stop(taskId)
           return { message: reserved.message, run: runNow ?? reserved.run }
         }
+
+        // A replay plays a fixture on the host: no desktop, no agent session to resume and no choice.
+        if (replayFixture !== null) {
+          yield* harness.replay(taskNow, reserved.run, replayFixture)
+          return { message: reserved.message, run: reserved.run }
+        }
+
+        // The desktop is not started with the run: the agent opens it with desktop_open when it needs one. A desktop the
+        // user already has running is passed on, so the run's sandbox can reach it.
+        const desktopNow = yield* desktop.status(taskId)
+        const display = desktopNow.state === "running" ? desktopNow.display : null
         yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession, choice)
         return { message: reserved.message, run: reserved.run }
       })
@@ -968,6 +1028,16 @@ export const CoreLive = Layer.effect(
           }
           yield* harness.cancel(runId)
           return yield* requireRun(runId)
+        }),
+
+      runItems: (user, runId) =>
+        Effect.gen(function* () {
+          const run = yield* requireRun(runId)
+          const state = yield* store.read
+          if (!ownsTask(state, user, run.taskId)) {
+            return yield* Effect.fail(new NotFound({ message: `run ${runId} not found` }))
+          }
+          return yield* harness.items(runId)
         }),
 
       desktopStatus: (user, taskId) => Effect.zipRight(ownedTask(user, taskId), desktop.status(taskId)),
